@@ -128,22 +128,35 @@ class BacktestEngine:
 
         if side == "BUY":
             cost = value + fee
+            # 资金不足时自动按比例缩减数量（而非直接拒绝）
+            if cost > self.capital and self.capital > 0:
+                ratio = self.capital / (cost + 1e-9)
+                quantity = max(quantity * ratio, 1e-8)
+                exec_price = price * (1 + self.SLIPPAGE_PCT)
+                value = exec_price * quantity
+                fee = value * self.TAKER_FEE
+                cost = value + fee
             if cost > self.capital:
                 return None
             self.capital -= cost
             self.position += quantity
             self.position_value = self.position * exec_price
-            self.entry_price = exec_price if self.position == quantity \
-                else (self.entry_price * (self.position - quantity) +
-                      exec_price * quantity) / self.position
+            # 计算新的平均入场价（避免除零）
+            if self.position == quantity:
+                self.entry_price = exec_price
+            elif self.position > 0:
+                self.entry_price = (
+                    self.entry_price * (self.position - quantity)
+                    + exec_price * quantity
+                ) / self.position
         else:
-            # SELL: 可能平仓，也可能开空
+            # SELL: 可能平仓（多），也可能开空
             self.capital += value - fee
             if quantity >= self.position:
-                # 平多仓
+                # 全部平多仓（或翻空）
                 if self.position > 0:
                     pnl = (exec_price - self.entry_price) * self.position
-                    pnl_pct = pnl / (self.entry_price * self.position)
+                    pnl_pct = pnl / (self.entry_price * self.position) if self.entry_price > 0 else 0.0
                     trade = Trade(
                         time=timestamp, symbol=self.symbol,
                         side="SELL", price=exec_price,
@@ -153,24 +166,25 @@ class BacktestEngine:
                     self.trades.append(trade)
                     self._record_pnl(pnl, pnl_pct)
 
-                # 剩余数量 = 开空
+                # 剩余 → 开空仓
                 remaining = quantity - self.position
                 self.position = -remaining if remaining > 0 else 0
                 self.entry_price = exec_price if self.position < 0 else 0.0
             else:
-                # 减多仓
-                pnl = (exec_price - self.entry_price) * quantity
-                pnl_pct = pnl / (self.entry_price * quantity)
+                # 部分平多仓
+                if self.position > 0:
+                    pnl = (exec_price - self.entry_price) * quantity
+                    pnl_pct = pnl / (self.entry_price * quantity) if self.entry_price > 0 else 0.0
+                    trade = Trade(
+                        time=timestamp, symbol=self.symbol,
+                        side="SELL", price=exec_price,
+                        quantity=quantity, value=value, fee=fee,
+                        pnl=pnl, pnl_pct=pnl_pct
+                    )
+                    self.trades.append(trade)
+                    self._record_pnl(pnl, pnl_pct)
                 self.position -= quantity
                 self.position_value = abs(self.position) * exec_price
-                trade = Trade(
-                    time=timestamp, symbol=self.symbol,
-                    side="SELL", price=exec_price,
-                    quantity=quantity, value=value, fee=fee,
-                    pnl=pnl, pnl_pct=pnl_pct
-                )
-                self.trades.append(trade)
-                self._record_pnl(pnl, pnl_pct)
 
         return None
 

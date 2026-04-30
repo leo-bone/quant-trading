@@ -141,14 +141,33 @@ def l3_multi_strategy(engine, idx: int) -> Optional[Dict]:
     buy_score = sum(s[1] for s in signals if s[0] == "BUY")
     sell_score = sum(s[1] for s in signals if s[0] == "SELL")
 
+    # 动态仓位: 基于当前可用资金，而非初始资金
+    # 最大保证金使用 60% 资本 (留 40% 缓冲)
+    max_position_value = engine.capital * 0.6
+    current_position_value = abs(engine.position) * current
+    position_pct = current_position_value / engine.capital if engine.capital > 0 else 0
+
     if buy_score >= 0.4 and buy_score > sell_score:
-        qty = (engine.initial_capital * 0.3) / current
+        if engine.position <= 0:
+            # 开多仓 / 翻多
+            target_value = min(max_position_value, engine.capital * 0.6)
+            qty = target_value / current
+        else:
+            # 已有仓位: 不追加（防止无限累积）
+            return None
         return {"action": "BUY", "quantity": qty,
-                "reason": f"多策略BUY(权重{buy_score:.2f})"}
+                "reason": f"多策略BUY(权重{buy_score:.2f},仓位{position_pct:.0%})"}
+
     elif sell_score >= 0.4 and sell_score > buy_score:
-        qty = (engine.initial_capital * 0.3) / current
+        if engine.position >= 0:
+            # 平多仓 / 开空
+            target_value = min(max_position_value, engine.capital * 0.6)
+            qty = target_value / current
+        else:
+            # 已有空仓: 不追加
+            return None
         return {"action": "SELL", "quantity": qty,
-                "reason": f"多策略SELL(权重{sell_score:.2f})"}
+                "reason": f"多策略SELL(权重{sell_score:.2f},仓位{position_pct:.0%})"}
 
     return None
 
