@@ -242,7 +242,7 @@ class ArbitrageStrategy:
             else:
                 return False
 
-            # 记录持仓
+            # 记录持仓 (含实际开仓数量，供平仓使用)
             key = f"{spot_sym}/{fut_sym}"
             self.active_positions[key] = {
                 "action": action,
@@ -250,6 +250,8 @@ class ArbitrageStrategy:
                 "entry_spread": opportunity["entry_spread"],
                 "spot_entry": entry_price_spot,
                 "fut_entry": entry_price_fut,
+                "spot_qty": spot_qty,
+                "fut_qty": fut_qty,
                 "net_return_pct": opportunity["net_return_pct"],
                 "annual_funding": opportunity["annual_funding"],
             }
@@ -310,36 +312,56 @@ class ArbitrageStrategy:
             del self.active_positions[key]
 
     def _close_position(self, key: str, reason: str):
-        """平仓"""
+        """平仓 (使用实际持仓数量)"""
         spot_sym, fut_sym = key.split("/")
         pos = self.active_positions.get(key, {})
 
         print(f"\n[平仓] {key}: {reason}")
 
         try:
+            spot_qty = float(pos.get("spot_qty", 0) or 0)
+            fut_qty = float(pos.get("fut_qty", 0) or 0)
+
             if pos.get("action") == "SHORT_FUTURES_BUY_SPOT":
                 # 平空合约 (买入)
                 fut_result = self.client.futures_order(
                     symbol=fut_sym, side="BUY", position_side="SHORT",
-                    order_type="MARKET", quantity=0, leverage=1
+                    order_type="MARKET", quantity=fut_qty, leverage=1
                 )
                 # 卖出现货
                 spot_result = self.client.spot_order(
                     symbol=spot_sym, side="SELL", order_type="MARKET",
-                    quantity=0
+                    quantity=spot_qty
                 )
 
             elif pos.get("action") == "BUY_FUTURES_SELL_SPOT":
                 # 平多合约 (卖出)
                 fut_result = self.client.futures_order(
                     symbol=fut_sym, side="SELL", position_side="LONG",
-                    order_type="MARKET", quantity=0, leverage=1
+                    order_type="MARKET", quantity=fut_qty, leverage=1
                 )
                 # 买入现货
                 spot_result = self.client.spot_order(
                     symbol=spot_sym, side="BUY", order_type="MARKET",
-                    quantity=0
+                    quantity=spot_qty
                 )
+            else:
+                return
+
+            # 记录已实现盈亏并同步给风控模块
+            entry_spot = pos.get("spot_entry", 0)
+            entry_fut = pos.get("fut_entry", 0)
+            close_spot = self.client.get_spot_price(spot_sym)
+            close_fut = self.client.get_futures_price(fut_sym)
+            if entry_spot > 0 and entry_fut > 0 and spot_qty > 0:
+                if pos.get("action") == "SHORT_FUTURES_BUY_SPOT":
+                    pnl = ((close_spot - entry_spot) * spot_qty
+                           + (entry_fut - close_fut) * fut_qty)
+                else:  # BUY_FUTURES_SELL_SPOT
+                    pnl = ((entry_spot - close_spot) * spot_qty
+                           + (close_fut - entry_fut) * fut_qty)
+                self.risk.update_trade(pnl)
+                print(f"[平仓] {key} 已实现盈亏: {pnl:.2f} USDT")
 
             # 记录历史
             self.position_history.append({
@@ -382,8 +404,20 @@ class ArbitrageStrategy:
                     if opp:
                         self.execute_arbitrage(opp, self.config.CAPITAL)
 
-                # 3. 风险检查
-                can_trade, msg = self.risk.can_trade(self.config.CAPITAL)
+                # 3. 风险检查 (接入实时账户权益，触发最大亏损/资金下限时停止)
+                spot_bal = self.client.get_spot_balance()
+                fut_bal = self.client.get_futures_balance()
+                current_balance = (
+                    sum(float(b["free"]) for b in spot_bal.get("balances", [])
+                        if b.get("asset") == "USDT")
+                    if isinstance(spot_bal, dict) else 0.0
+                ) + (
+                    sum(float(b.get("balance", 0)) for b in fut_bal
+                        if b.get("asset") == "USDT")
+                    if isinstance(fut_bal, list) else 0.0
+                )
+                self.risk.update_balance(current_balance)
+                can_trade, msg = self.risk.can_trade(current_balance)
                 if not can_trade:
                     print(f"[风险] {msg}")
                     return
