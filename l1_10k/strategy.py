@@ -142,6 +142,25 @@ class GridStrategy:
             else:
                 self.position -= qty
 
+    def _close_position(self, symbol: str, reason: str):
+        """止损/止盈触发时真正市价平仓并重置持仓"""
+        if self.position > 0:
+            qty = self.client._round_step_size(self.position, symbol, "spot")
+            if qty > 0:
+                result = self.client.spot_order(
+                    symbol=symbol, side="SELL", order_type="MARKET", quantity=qty
+                )
+                print(f"[Grid] {reason} 平仓 {symbol} x {qty}: {result}")
+                # 同步风控盈亏
+                if self.entry_price > 0:
+                    exit_price = self.client.get_spot_price(symbol)
+                    pnl = (exit_price - self.entry_price) * qty
+                    self.risk.update_trade(pnl)
+            else:
+                print(f"[Grid] {reason} 但持仓四舍五入为0，跳过平仓")
+        self.position = 0.0
+        self.entry_price = 0.0
+
     # ─── 网格初始化 ───
 
     def initialize_grid(self, symbol: str, price_range: Optional[tuple] = None,
@@ -350,20 +369,26 @@ class GridStrategy:
                     if self.risk.check_take_profit(
                             self.entry_price, self.last_price, "BUY", 1):
                         print(f"[Grid] 止盈! 持仓 PnL {pnl_pct*100:.2f}%")
+                        self._close_position(symbol, "止盈")
+                        return
                     elif self.risk.check_stop_loss(
                             self.entry_price, self.last_price, "BUY", 1):
                         print(f"[Grid] 止损! 持仓 PnL {pnl_pct*100:.2f}%")
+                        self._close_position(symbol, "止损")
+                        return
 
-                # 风险检查
+                # 风险检查 (接入实时权益，触发最大亏损/资金下限时停止)
                 balance_data = self.client.get_spot_balance()
                 total_value = self._get_balance(balance_data, "USDT")
-                can_trade, msg = self.risk.can_trade(
-                    total_value + sum(
-                        float(k.get("price", 0)) * float(k.get("quantity", 0))
-                        for k in self.pending_orders
-                        if k.get("side") == "BUY"
-                    )
+                position_value = self.position * self.last_price
+                pending_buy_value = sum(
+                    float(k.get("price", 0)) * float(k.get("quantity", 0))
+                    for k in self.pending_orders
+                    if k.get("side") == "BUY"
                 )
+                current_balance = total_value + position_value + pending_buy_value
+                self.risk.update_balance(current_balance)
+                can_trade, msg = self.risk.can_trade(current_balance)
                 if not can_trade:
                     print(f"[风险警告] {msg}")
                     break
