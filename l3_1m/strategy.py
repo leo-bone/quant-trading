@@ -326,14 +326,14 @@ class MultiStrategy:
                     side="SELL" if pos["side"] == "BUY" else "BUY",
                     position_side="BOTH",
                     order_type="MARKET",
-                    quantity=0,  # 实际需要传入持仓数量
+                    quantity=pos.get("quantity", 0),
                     leverage=2
                 )
             else:
                 self.client.spot_order(
                     symbol=symbol, side="SELL" if pos["side"] == "BUY" else "BUY",
                     order_type="MARKET",
-                    quantity=0
+                    quantity=pos.get("quantity", 0)
                 )
 
             # 记录PnL
@@ -369,6 +369,11 @@ class MultiStrategy:
             print(f"[{signal['strategy']}] 数量为0，跳过")
             return None
 
+        can_trade, trade_msg = self.risk.can_trade(self.config.CAPITAL)
+        if not can_trade:
+            print(f"[风控] 禁止开仓: {trade_msg}，跳过 {symbol}")
+            return None
+
         result = self.client.spot_order(
             symbol=symbol, side=signal["action"],
             order_type="MARKET", quantity=quantity, price=price
@@ -380,6 +385,7 @@ class MultiStrategy:
                 "strategy": signal["strategy"],
                 "side": signal["action"],
                 "entry_price": price,
+                "quantity": quantity,
                 "stop_loss": signal.get("stop_loss", 0),
                 "target": signal.get("target", 0),
                 "position_size_pct": signal["position_size_pct"],
@@ -490,8 +496,20 @@ class MultiStrategy:
 
                     time.sleep(2)  # 每个交易对间隔 2 秒 (避免 API 限速)
 
-                # 6. 风险检查
-                can_trade, msg = self.risk.can_trade(self.config.CAPITAL)
+                # 6. 风险检查 (接入实时权益，触发最大亏损/资金下限时停止)
+                spot_bal = self.client.get_spot_balance()
+                total_value = (
+                    sum(float(b["free"]) for b in spot_bal.get("balances", [])
+                        if b.get("asset") == "USDT")
+                    if isinstance(spot_bal, dict) else 0.0
+                )
+                position_value = sum(
+                    float(p.get("quantity", 0)) * self.client.get_spot_price(sym)
+                    for sym, p in self.active_positions.items()
+                )
+                current_balance = total_value + position_value
+                self.risk.update_balance(current_balance)
+                can_trade, msg = self.risk.can_trade(current_balance)
                 if not can_trade:
                     print(f"[风控] {msg}")
                     return
