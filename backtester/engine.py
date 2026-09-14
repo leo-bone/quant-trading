@@ -273,7 +273,8 @@ class BacktestEngine:
                               f"{signal.get('reason', '')}")
 
             # 更新权益曲线
-            equity = self.capital + abs(self.position) * k["close"]
+            # 多头: position>0 加市值; 空头: position<0 减市值 (空头盈利=(entry-close)*qty)
+            equity = self.capital + self.position * k["close"]
             self.peak_equity = max(self.peak_equity, equity)
             drawdown = (self.peak_equity - equity) / self.peak_equity
             self.equity_curve.append(
