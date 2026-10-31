@@ -11,4 +11,4 @@ colorlog>=6.7.0
 
 # 可选: 异步 (高级)
 aiohttp>=3.8.0
-asyncio>=3.4.3
+asyncio>=4.0.0
