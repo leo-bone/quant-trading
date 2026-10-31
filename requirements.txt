@@ -7,7 +7,7 @@ pandas>=1.5.0
 numpy>=1.23.0
 
 # 可选: 日志
-colorlog>=6.7.0
+colorlog>=6.12.0
 
 # 可选: 异步 (高级)
 aiohttp>=3.8.0
